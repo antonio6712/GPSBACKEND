@@ -17,7 +17,7 @@ const io = socketIo(server, {
   }
 });
 
-// CORS PARA EXPRESS
+// CORS PARA EXPRESS - CONFIGURACIÓN SIMPLIFICADA
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "OPTIONS"],
@@ -25,8 +25,17 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
 
-// Manejar preflight requests
-app.options('*', cors());
+// Middleware para manejar preflight requests manualmente
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  next();
+});
 
 app.use(express.json());
 
