@@ -7,33 +7,40 @@ require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
+
+// CORS CONFIGURADO CORRECTAMENTE
 const io = socketIo(server, {
   cors: {
     origin: "*",
-    methods: ["GET", "POST"]
+    methods: ["GET", "POST"],
+    credentials: false
   }
 });
 
-// Middlewares
-app.use(cors());
+// CORS PARA EXPRESS
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  credentials: false,
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
+
+// Manejar preflight requests
+app.options('*', cors());
+
 app.use(express.json());
 
-// Conexión a MongoDB Atlas CON TUS DATOS
+// Conexión a MongoDB Atlas
 const MONGODB_URI = process.env.MONGODB_URI;
 
-console.log('🔗 Intentando conectar a MongoDB Atlas...');
+console.log('🔗 Conectando a MongoDB Atlas...');
 
 mongoose.connect(MONGODB_URI)
   .then(() => {
     console.log('✅ Conectado a MongoDB Atlas correctamente!');
-    console.log('📊 Base de datos: gpstracker');
   })
   .catch(err => {
     console.error('❌ Error conectando a MongoDB:', err.message);
-    console.log('💡 Verifica:');
-    console.log('   1. Tu contraseña en el archivo .env');
-    console.log('   2. Que tu IP esté en la whitelist de MongoDB Atlas');
-    console.log('   3. Que el cluster esté activo');
   });
 
 // Esquema para ubicaciones GPS
@@ -53,37 +60,19 @@ const Location = mongoose.model('Location', locationSchema);
 app.get('/', (req, res) => {
   res.json({ 
     message: '🚀 GPS Tracker API funcionando!',
-    version: '1.0.0',
-    database: 'MongoDB Atlas',
-    endpoints: {
-      test: 'GET /api/test',
-      saveLocation: 'POST /api/location',
-      getUserLocations: 'GET /api/locations/:userId',
-      getAllUsers: 'GET /api/admin/users'
-    }
+    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    cors: 'enabled',
+    frontend: 'https://bucolic-cucurucho-09dba9.netlify.app'
   });
 });
 
-// Ruta de prueba de base de datos
-app.get('/api/test', async (req, res) => {
-  try {
-    // Verificar conexión a la base de datos
-    const dbStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
-    
-    // Contar ubicaciones guardadas
-    const locationCount = await Location.countDocuments();
-    
-    res.json({
-      database: dbStatus,
-      locationsInDB: locationCount,
-      message: '✅ Backend y base de datos funcionando correctamente'
-    });
-  } catch (error) {
-    res.status(500).json({
-      error: 'Error conectando a la base de datos',
-      details: error.message
-    });
-  }
+// Ruta de prueba de CORS
+app.get('/api/cors-test', (req, res) => {
+  res.json({
+    message: '✅ CORS funcionando correctamente',
+    timestamp: new Date().toISOString(),
+    origin: req.headers.origin || 'No origin header'
+  });
 });
 
 // Guardar ubicación
@@ -91,14 +80,31 @@ app.post('/api/location', async (req, res) => {
   try {
     const { userId, latitude, longitude, accuracy } = req.body;
     
-    console.log('📍 Recibiendo ubicación:', { userId, latitude, longitude });
-    
+    console.log('📍 Recibiendo ubicación desde:', req.headers.origin);
+    console.log('📍 Datos:', { userId, latitude, longitude });
+
     // Validaciones
-    if (!userId) {
-      return res.status(400).json({ error: 'userId es requerido' });
+    if (!userId || latitude === undefined || longitude === undefined) {
+      return res.status(400).json({ error: 'Datos incompletos' });
     }
-    if (latitude === undefined || longitude === undefined) {
-      return res.status(400).json({ error: 'latitude y longitude son requeridos' });
+
+    // Si la BD no está conectada
+    if (mongoose.connection.readyState !== 1) {
+      console.log('⚠️  BD no disponible - Modo offline');
+      
+      io.emit('locationUpdate', {
+        userId,
+        latitude,
+        longitude,
+        accuracy,
+        timestamp: new Date()
+      });
+      
+      return res.json({ 
+        success: true, 
+        message: 'Ubicación recibida (modo offline)',
+        offline: true
+      });
     }
 
     const location = new Location({ 
@@ -149,25 +155,31 @@ app.post('/api/location', async (req, res) => {
 app.get('/api/locations/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
-    const limit = parseInt(req.query.limit) || 50;
     
+    if (mongoose.connection.readyState !== 1) {
+      return res.json([]);
+    }
+    
+    const limit = parseInt(req.query.limit) || 50;
     const locations = await Location.find({ userId })
       .sort({ timestamp: -1 })
       .limit(limit);
-    
-    console.log(`📋 Obteniendo ${locations.length} ubicaciones para usuario: ${userId}`);
     
     res.json(locations);
     
   } catch (error) {
     console.error('Error obteniendo ubicaciones:', error);
-    res.status(500).json({ error: 'Error obteniendo ubicaciones' });
+    res.json([]);
   }
 });
 
 // Obtener TODOS los usuarios (PARA ADMIN)
 app.get('/api/admin/users', async (req, res) => {
   try {
+    if (mongoose.connection.readyState !== 1) {
+      return res.json([]);
+    }
+    
     const users = await Location.aggregate([
       {
         $sort: { timestamp: -1 }
@@ -198,47 +210,22 @@ app.get('/api/admin/users', async (req, res) => {
       }
     ]);
     
-    console.log(`👥 Lista de usuarios obtenida: ${users.length} usuarios`);
-    
     res.json(users);
     
   } catch (error) {
     console.error('Error obteniendo usuarios admin:', error);
-    res.status(500).json({ error: 'Error obteniendo lista de usuarios' });
-  }
-});
-
-// Obtener historial de usuario (PARA ADMIN)
-app.get('/api/admin/user/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const limit = parseInt(req.query.limit) || 100;
-    
-    const locations = await Location.find({ userId })
-      .sort({ timestamp: -1 })
-      .limit(limit);
-    
-    res.json(locations);
-    
-  } catch (error) {
-    console.error('Error obteniendo historial usuario:', error);
-    res.status(500).json({ error: 'Error obteniendo historial del usuario' });
+    res.json([]);
   }
 });
 
 // ==================== WEBSOCKETS ====================
 
 io.on('connection', (socket) => {
-  console.log('🔌 Cliente conectado:', socket.id);
+  console.log('🔌 Cliente conectado:', socket.id, 'Desde:', socket.handshake.headers.origin);
   
   socket.on('join-admin-room', () => {
     socket.join('admin-room');
     console.log('👨‍💼 Admin conectado:', socket.id);
-  });
-  
-  socket.on('leave-admin-room', () => {
-    socket.leave('admin-room');
-    console.log('👨‍💼 Admin desconectado:', socket.id);
   });
   
   socket.on('disconnect', () => {
@@ -255,14 +242,7 @@ server.listen(PORT, () => {
   console.log('🚀 GPS TRACKER BACKEND INICIADO');
   console.log('='.repeat(50));
   console.log(`📍 Servidor: http://localhost:${PORT}`);
+  console.log(`🌍 CORS: Habilitado para todos los orígenes`);
   console.log(`🗄️  Base de datos: MongoDB Atlas`);
-  console.log(`🌍 Entorno: ${process.env.NODE_ENV}`);
-  console.log('='.repeat(50));
-  console.log('📋 Endpoints disponibles:');
-  console.log('   GET  /              - Página de inicio');
-  console.log('   GET  /api/test      - Probar base de datos');
-  console.log('   POST /api/location  - Guardar ubicación');
-  console.log('   GET  /api/locations/:userId - Obtener ubicaciones');
-  console.log('   GET  /api/admin/users - Panel administrador');
   console.log('='.repeat(50));
 });
