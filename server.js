@@ -30,7 +30,7 @@ app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  
+
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
@@ -67,7 +67,7 @@ const Location = mongoose.model('Location', locationSchema);
 
 // Ruta de prueba
 app.get('/', (req, res) => {
-  res.json({ 
+  res.json({
     message: '🚀 GPS Tracker API funcionando!',
     database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     cors: 'enabled',
@@ -88,7 +88,7 @@ app.get('/api/cors-test', (req, res) => {
 app.post('/api/location', async (req, res) => {
   try {
     const { userId, latitude, longitude, accuracy } = req.body;
-    
+
     console.log('📍 Recibiendo ubicación desde:', req.headers.origin);
     console.log('📍 Datos:', { userId, latitude, longitude });
 
@@ -100,7 +100,7 @@ app.post('/api/location', async (req, res) => {
     // Si la BD no está conectada
     if (mongoose.connection.readyState !== 1) {
       console.log('⚠️  BD no disponible - Modo offline');
-      
+
       io.emit('locationUpdate', {
         userId,
         latitude,
@@ -108,24 +108,24 @@ app.post('/api/location', async (req, res) => {
         accuracy,
         timestamp: new Date()
       });
-      
-      return res.json({ 
-        success: true, 
+
+      return res.json({
+        success: true,
         message: 'Ubicación recibida (modo offline)',
         offline: true
       });
     }
 
-    const location = new Location({ 
-      userId: userId.toString(), 
-      latitude, 
-      longitude, 
-      accuracy: accuracy || 0 
+    const location = new Location({
+      userId: userId.toString(),
+      latitude,
+      longitude,
+      accuracy: accuracy || 0
     });
-    
+
     await location.save();
     console.log('💾 Ubicación guardada en BD para usuario:', userId);
-    
+
     // Emitir en tiempo real
     io.emit('locationUpdate', {
       userId,
@@ -134,7 +134,7 @@ app.post('/api/location', async (req, res) => {
       accuracy,
       timestamp: location.timestamp
     });
-    
+
     // Emitir a admin
     io.to('admin-room').emit('adminLocationUpdate', {
       userId,
@@ -145,17 +145,17 @@ app.post('/api/location', async (req, res) => {
       type: 'user_update'
     });
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       message: 'Ubicación guardada correctamente',
-      data: location 
+      data: location
     });
-    
+
   } catch (error) {
     console.error('❌ Error guardando ubicación:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Error interno del servidor',
-      details: error.message 
+      details: error.message
     });
   }
 });
@@ -164,18 +164,18 @@ app.post('/api/location', async (req, res) => {
 app.get('/api/locations/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
-    
+
     if (mongoose.connection.readyState !== 1) {
       return res.json([]);
     }
-    
+
     const limit = parseInt(req.query.limit) || 50;
     const locations = await Location.find({ userId })
       .sort({ timestamp: -1 })
       .limit(limit);
-    
+
     res.json(locations);
-    
+
   } catch (error) {
     console.error('Error obteniendo ubicaciones:', error);
     res.json([]);
@@ -188,7 +188,7 @@ app.get('/api/admin/users', async (req, res) => {
     if (mongoose.connection.readyState !== 1) {
       return res.json([]);
     }
-    
+
     const users = await Location.aggregate([
       {
         $sort: { timestamp: -1 }
@@ -218,9 +218,9 @@ app.get('/api/admin/users', async (req, res) => {
         $sort: { lastSeen: -1 }
       }
     ]);
-    
+
     res.json(users);
-    
+
   } catch (error) {
     console.error('Error obteniendo usuarios admin:', error);
     res.json([]);
@@ -231,16 +231,60 @@ app.get('/api/admin/users', async (req, res) => {
 
 io.on('connection', (socket) => {
   console.log('🔌 Cliente conectado:', socket.id, 'Desde:', socket.handshake.headers.origin);
-  
+
+  // Mapa temporal de usuarios conectados
+  socket.on("register-user", (data) => {
+    if (!data || !data.userId) return;
+
+    socket.userId = data.userId.toString();
+
+    console.log("🟢 Usuario registrado por WebSocket:", socket.userId);
+
+    // Avisar a los admins que un usuario apareció
+    io.to("admin-room").emit("adminLocationUpdate", {
+      userId: socket.userId,
+      type: "user_connected",
+      timestamp: new Date()
+    });
+  });
+
+  // Cuando un usuario envía ubicación por WebSocket
+  socket.on("sendLocation", (loc) => {
+    if (!loc || !loc.userId) return;
+
+    // Reenviar a los admins
+    io.to("admin-room").emit("adminLocationUpdate", {
+      ...loc,
+      type: "user_update",
+      timestamp: new Date()
+    });
+
+    // Broadcast general por si lo necesitas
+    io.emit("locationUpdate", {
+      ...loc,
+      timestamp: new Date()
+    });
+  });
+
+  // Admin se une a la sala
   socket.on('join-admin-room', () => {
     socket.join('admin-room');
     console.log('👨‍💼 Admin conectado:', socket.id);
   });
-  
+
   socket.on('disconnect', () => {
     console.log('🔌 Cliente desconectado:', socket.id);
+
+    if (socket.userId) {
+      io.to("admin-room").emit("adminLocationUpdate", {
+        userId: socket.userId,
+        type: "user_disconnected",
+        timestamp: new Date()
+      });
+    }
   });
 });
+
 
 // ==================== INICIAR SERVIDOR ====================
 
