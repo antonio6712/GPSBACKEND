@@ -218,14 +218,15 @@ app.get('/api/admin/users', async (req, res) => {
 app.get('/api/admin/user/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
-    const limit = parseInt(req.query.limit) || 100;
+    const limit = parseInt(req.query.limit) || 500; // 🆕 Aumentar límite por defecto
 
     if (mongoose.connection.readyState !== 1) {
       return res.json([]);
     }
 
+    // 🆕 ORDENAR POR TIMESTAMP ASCENDENTE para la línea temporal correcta
     const locations = await Location.find({ userId })
-      .sort({ timestamp: 1 }) // Orden ascendente para la ruta
+      .sort({ timestamp: 1 }) // 🆕 Cambiar a 1 para orden ascendente
       .limit(limit);
 
     console.log(`📊 Enviando ${locations.length} ubicaciones para usuario: ${userId}`);
