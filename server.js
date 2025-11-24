@@ -223,6 +223,29 @@ app.get('/api/admin/users', async (req, res) => {
   }
 });
 
+
+app.get('/api/admin/user/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const limit = parseInt(req.query.limit) || 100;
+
+    if (mongoose.connection.readyState !== 1) {
+      return res.json([]);
+    }
+
+    const locations = await Location.find({ userId })
+      .sort({ timestamp: 1 }) // Orden ascendente para la ruta
+      .limit(limit);
+
+    console.log(`📊 Enviando ${locations.length} ubicaciones para usuario: ${userId}`);
+    res.json(locations);
+
+  } catch (error) {
+    console.error('Error obteniendo historial de usuario:', error);
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+});
+
 // Obtener historial completo de un usuario (PARA ADMIN)
 app.get('/api/admin/user/:userId', async (req, res) => {
   try {
