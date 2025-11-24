@@ -97,36 +97,31 @@ app.post('/api/location', async (req, res) => {
       return res.status(400).json({ error: 'Datos incompletos' });
     }
 
-    // Si la BD no está conectada
-    if (mongoose.connection.readyState !== 1) {
-      console.log('⚠️  BD no disponible - Modo offline');
+    let location;
 
-      io.emit('locationUpdate', {
-        userId,
+    // Si la BD está conectada, guardar
+    if (mongoose.connection.readyState === 1) {
+      location = new Location({
+        userId: userId.toString(),
         latitude,
         longitude,
-        accuracy,
-        timestamp: new Date()
+        accuracy: accuracy || 0
       });
 
-      return res.json({
-        success: true,
-        message: 'Ubicación recibida (modo offline)',
-        offline: true
-      });
+      await location.save();
+      console.log('💾 Ubicación guardada en BD para usuario:', userId);
+    } else {
+      console.log('⚠️  BD no disponible - Modo offline');
+      location = {
+        userId: userId.toString(),
+        latitude,
+        longitude,
+        accuracy: accuracy || 0,
+        timestamp: new Date()
+      };
     }
 
-    const location = new Location({
-      userId: userId.toString(),
-      latitude,
-      longitude,
-      accuracy: accuracy || 0
-    });
-
-    await location.save();
-    console.log('💾 Ubicación guardada en BD para usuario:', userId);
-
-    // Emitir en tiempo real
+    // Emitir en tiempo real a TODOS los clientes
     io.emit('locationUpdate', {
       userId,
       latitude,
@@ -135,7 +130,7 @@ app.post('/api/location', async (req, res) => {
       timestamp: location.timestamp
     });
 
-    // Emitir a admin
+    // Emitir específicamente a los admins
     io.to('admin-room').emit('adminLocationUpdate', {
       userId,
       latitude,
@@ -147,7 +142,7 @@ app.post('/api/location', async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Ubicación guardada correctamente',
+      message: 'Ubicación recibida correctamente',
       data: location
     });
 
@@ -219,10 +214,34 @@ app.get('/api/admin/users', async (req, res) => {
       }
     ]);
 
+    console.log(`📊 Enviando ${users.length} usuarios al admin`);
     res.json(users);
 
   } catch (error) {
     console.error('Error obteniendo usuarios admin:', error);
+    res.json([]);
+  }
+});
+
+// Obtener historial completo de un usuario (PARA ADMIN)
+app.get('/api/admin/user/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const limit = parseInt(req.query.limit) || 100;
+
+    if (mongoose.connection.readyState !== 1) {
+      return res.json([]);
+    }
+
+    const locations = await Location.find({ userId })
+      .sort({ timestamp: -1 })
+      .limit(limit);
+
+    console.log(`📊 Enviando ${locations.length} ubicaciones para usuario: ${userId}`);
+    res.json(locations);
+
+  } catch (error) {
+    console.error('Error obteniendo historial de usuario:', error);
     res.json([]);
   }
 });
@@ -248,9 +267,11 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Cuando un usuario envía ubicación por WebSocket
-  socket.on("sendLocation", (loc) => {
+  // CORRECCIÓN: Cambiar el nombre del evento para que coincida con el frontend
+  socket.on("send-location", (loc) => {
     if (!loc || !loc.userId) return;
+
+    console.log("📍 Ubicación recibida por WebSocket de:", loc.userId);
 
     // Reenviar a los admins
     io.to("admin-room").emit("adminLocationUpdate", {
@@ -264,6 +285,22 @@ io.on('connection', (socket) => {
       ...loc,
       timestamp: new Date()
     });
+
+    // También guardar en la base de datos
+    if (mongoose.connection.readyState === 1) {
+      const location = new Location({
+        userId: loc.userId,
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        accuracy: loc.accuracy || 0
+      });
+
+      location.save().then(() => {
+        console.log('💾 Ubicación WebSocket guardada para:', loc.userId);
+      }).catch(err => {
+        console.error('Error guardando ubicación WebSocket:', err);
+      });
+    }
   });
 
   // Admin se une a la sala
@@ -284,7 +321,6 @@ io.on('connection', (socket) => {
     }
   });
 });
-
 
 // ==================== INICIAR SERVIDOR ====================
 
