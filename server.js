@@ -89,17 +89,16 @@ app.post('/api/location', async (req, res) => {
   try {
     const { userId, latitude, longitude, accuracy } = req.body;
 
-    console.log('📍 Recibiendo ubicación desde:', req.headers.origin);
-    console.log('📍 Datos:', { userId, latitude, longitude });
+    console.log('📍 Recibiendo ubicación para guardar:', { userId, latitude, longitude });
 
-    // Validaciones
+    // Validaciones básicas
     if (!userId || latitude === undefined || longitude === undefined) {
       return res.status(400).json({ error: 'Datos incompletos' });
     }
 
     let location;
 
-    // Si la BD está conectada, guardar
+    // Guardar en BD siempre (sin filtros)
     if (mongoose.connection.readyState === 1) {
       location = new Location({
         userId: userId.toString(),
@@ -109,45 +108,36 @@ app.post('/api/location', async (req, res) => {
       });
 
       await location.save();
-      console.log('💾 Ubicación guardada en BD para usuario:', userId);
-    } else {
-      console.log('⚠️  BD no disponible - Modo offline');
-      location = {
-        userId: userId.toString(),
-        latitude,
-        longitude,
-        accuracy: accuracy || 0,
-        timestamp: new Date()
-      };
+      console.log('💾 Ubicación GUARDADA en BD para usuario:', userId);
     }
 
-    // Emitir en tiempo real a TODOS los clientes
+    // ... resto del código para emitir por WebSocket
+    // EMITIR SIEMPRE, incluso si no se guardó en BD
     io.emit('locationUpdate', {
       userId,
       latitude,
       longitude,
       accuracy,
-      timestamp: location.timestamp
+      timestamp: location?.timestamp || new Date()
     });
 
-    // Emitir específicamente a los admins
     io.to('admin-room').emit('adminLocationUpdate', {
       userId,
       latitude,
       longitude,
       accuracy,
-      timestamp: location.timestamp,
+      timestamp: location?.timestamp || new Date(),
       type: 'user_update'
     });
 
     res.json({
       success: true,
-      message: 'Ubicación recibida correctamente',
-      data: location
+      message: 'Ubicación procesada correctamente',
+      saved: !!location
     });
 
   } catch (error) {
-    console.error('❌ Error guardando ubicación:', error);
+    console.error('❌ Error procesando ubicación:', error);
     res.status(500).json({
       error: 'Error interno del servidor',
       details: error.message
@@ -224,6 +214,7 @@ app.get('/api/admin/users', async (req, res) => {
 });
 
 
+// Obtener historial completo de un usuario (PARA ADMIN)
 app.get('/api/admin/user/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -245,7 +236,6 @@ app.get('/api/admin/user/:userId', async (req, res) => {
     res.status(500).json({ error: 'Error interno del servidor' });
   }
 });
-
 // Obtener historial completo de un usuario (PARA ADMIN)
 app.get('/api/admin/user/:userId', async (req, res) => {
   try {
