@@ -3,7 +3,12 @@ const http = require('http');
 const socketIo = require('socket.io');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
+
+// Importar modelos
+const User = require('./models/User');
+const Location = require('./models/Location');
 
 const app = express();
 const server = http.createServer(app);
@@ -20,7 +25,7 @@ const io = socketIo(server, {
 // CORS PARA EXPRESS - CONFIGURACIÓN SIMPLIFICADA
 app.use(cors({
   origin: "*",
-  methods: ["GET", "POST", "OPTIONS"],
+  methods: ["GET", "POST", "OPTIONS", "PUT", "DELETE"],
   credentials: false,
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
@@ -28,7 +33,7 @@ app.use(cors({
 // Middleware para manejar preflight requests manualmente
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') {
@@ -52,18 +57,59 @@ mongoose.connect(MONGODB_URI)
     console.error('❌ Error conectando a MongoDB:', err.message);
   });
 
-// Esquema para ubicaciones GPS
-const locationSchema = new mongoose.Schema({
-  userId: { type: String, required: true },
-  latitude: { type: Number, required: true },
-  longitude: { type: Number, required: true },
-  accuracy: Number,
-  timestamp: { type: Date, default: Date.now }
-});
+// ==================== MIDDLEWARE DE AUTENTICACIÓN ====================
 
-const Location = mongoose.model('Location', locationSchema);
+const auth = {
+  // Verificar token JWT
+  verifyToken: (req, res, next) => {
+    const authHeader = req.header('Authorization');
+    const token = authHeader && authHeader.startsWith('Bearer ') 
+      ? authHeader.substring(7) 
+      : null;
+    
+    if (!token) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Acceso denegado. No hay token.' 
+      });
+    }
 
-// ==================== RUTAS DE LA API ====================
+    try {
+      const verified = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+      req.user = verified;
+      next();
+    } catch (error) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Token inválido o expirado.' 
+      });
+    }
+  },
+
+  // Verificar si es administrador
+  isAdmin: (req, res, next) => {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Acceso denegado. Se requieren permisos de administrador.' 
+      });
+    }
+    next();
+  },
+
+  // Verificar si es usuario normal
+  isUser: (req, res, next) => {
+    if (req.user.role !== 'user') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Acceso denegado.' 
+      });
+    }
+    next();
+  }
+};
+
+// ==================== RUTAS PÚBLICAS ====================
 
 // Ruta de prueba
 app.get('/', (req, res) => {
@@ -71,7 +117,12 @@ app.get('/', (req, res) => {
     message: '🚀 GPS Tracker API funcionando!',
     database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     cors: 'enabled',
-    frontend: 'https://bucolic-cucurucho-09dba9.netlify.app'
+    version: '1.0.0',
+    endpoints: {
+      auth: '/api/auth/*',
+      locations: '/api/location',
+      admin: '/api/admin/*'
+    }
   });
 });
 
@@ -80,20 +131,212 @@ app.get('/api/cors-test', (req, res) => {
   res.json({
     message: '✅ CORS funcionando correctamente',
     timestamp: new Date().toISOString(),
-    origin: req.headers.origin || 'No origin header'
+    origin: req.headers.origin || 'No origin header',
+    headers: req.headers
   });
 });
 
-// Guardar ubicación
-app.post('/api/location', async (req, res) => {
+// ==================== RUTAS DE AUTENTICACIÓN ====================
+
+// Registrar nuevo usuario
+app.post('/api/auth/register', async (req, res) => {
   try {
-    const { userId, latitude, longitude, accuracy } = req.body;
+    const { email, password, username, fullName, phone, vehicle } = req.body;
+
+    // Validaciones
+    if (!email || !password || !username) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Email, contraseña y nombre de usuario son requeridos.' 
+      });
+    }
+
+    // Verificar si el usuario ya existe
+    const existingUser = await User.findOne({ 
+      $or: [{ email }, { username }] 
+    });
+
+    if (existingUser) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'El email o nombre de usuario ya están registrados.' 
+      });
+    }
+
+    // Crear usuario
+    const user = new User({
+      email: email.toLowerCase(),
+      password,
+      username,
+      role: 'user', // Por defecto es usuario normal
+      profile: {
+        fullName: fullName || '',
+        phone: phone || '',
+        vehicle: vehicle || '',
+        avatarColor: `#${Math.floor(Math.random()*16777215).toString(16)}`
+      },
+      deviceId: `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    });
+
+    await user.save();
+
+    // Generar token JWT
+    const token = jwt.sign(
+      { 
+        id: user._id, 
+        email: user.email, 
+        username: user.username, 
+        role: user.role,
+        deviceId: user.deviceId 
+      },
+      process.env.JWT_SECRET || 'your-secret-key',
+      { expiresIn: '7d' }
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Usuario registrado exitosamente.',
+      user: {
+        id: user._id,
+        email: user.email,
+        username: user.username,
+        role: user.role,
+        deviceId: user.deviceId,
+        profile: user.profile
+      },
+      token
+    });
+
+  } catch (error) {
+    console.error('Error en registro:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error en el servidor.', 
+      error: error.message 
+    });
+  }
+});
+
+// Login de usuario - CORREGIDO
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // Validaciones
+    if (!email || !password) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Email y contraseña son requeridos.' 
+      });
+    }
+
+    // Buscar usuario
+    const user = await User.findOne({ email: email.toLowerCase() });
+    
+    if (!user) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Credenciales inválidas.' 
+      });
+    }
+
+    // Verificar contraseña
+    const isMatch = await user.comparePassword(password);
+    
+    if (!isMatch) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Credenciales inválidas.' 
+      });
+    }
+
+    // Actualizar último login SIN trigger del middleware
+    user.lastLogin = new Date();
+    
+    // Guardar sin validar para evitar problemas con el middleware de password
+    await user.save({ validateBeforeSave: false });
+
+    // Generar token JWT
+    const token = jwt.sign(
+      { 
+        id: user._id, 
+        email: user.email, 
+        username: user.username, 
+        role: user.role,
+        deviceId: user.deviceId 
+      },
+      process.env.JWT_SECRET || 'your-secret-key',
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      success: true,
+      message: 'Login exitoso.',
+      user: {
+        id: user._id,
+        email: user.email,
+        username: user.username,
+        role: user.role,
+        deviceId: user.deviceId,
+        profile: user.profile,
+        lastLogin: user.lastLogin
+      },
+      token
+    });
+
+  } catch (error) {
+    console.error('Error en login:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error en el servidor.', 
+      error: error.message 
+    });
+  }
+});
+
+// Obtener perfil del usuario actual (protegido)
+app.get('/api/auth/profile', auth.verifyToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('-password');
+    
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Usuario no encontrado.' 
+      });
+    }
+
+    res.json({
+      success: true,
+      user
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo perfil:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error en el servidor.' 
+    });
+  }
+});
+
+// ==================== RUTAS DE UBICACIONES ====================
+
+// Guardar ubicación (protegida)
+app.post('/api/location', auth.verifyToken, async (req, res) => {
+  try {
+    // Usar el userId del usuario autenticado
+    const userId = req.user.deviceId || req.user.id;
+    const { latitude, longitude, accuracy } = req.body;
 
     console.log('📍 Recibiendo ubicación para guardar:', { userId, latitude, longitude });
 
     // Validaciones básicas
-    if (!userId || latitude === undefined || longitude === undefined) {
-      return res.status(400).json({ error: 'Datos incompletos' });
+    if (latitude === undefined || longitude === undefined) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Datos incompletos' 
+      });
     }
 
     let location;
@@ -111,13 +354,12 @@ app.post('/api/location', async (req, res) => {
       console.log('💾 Ubicación GUARDADA en BD para usuario:', userId);
     }
 
-    // ... resto del código para emitir por WebSocket
-    // EMITIR SIEMPRE, incluso si no se guardó en BD
+    // Emitir por WebSocket
     io.emit('locationUpdate', {
       userId,
       latitude,
       longitude,
-      accuracy,
+      accuracy: accuracy || 0,
       timestamp: location?.timestamp || new Date()
     });
 
@@ -125,7 +367,7 @@ app.post('/api/location', async (req, res) => {
       userId,
       latitude,
       longitude,
-      accuracy,
+      accuracy: accuracy || 0,
       timestamp: location?.timestamp || new Date(),
       type: 'user_update'
     });
@@ -139,16 +381,25 @@ app.post('/api/location', async (req, res) => {
   } catch (error) {
     console.error('❌ Error procesando ubicación:', error);
     res.status(500).json({
+      success: false,
       error: 'Error interno del servidor',
       details: error.message
     });
   }
 });
 
-// Obtener ubicaciones de un usuario
-app.get('/api/locations/:userId', async (req, res) => {
+// Obtener ubicaciones de un usuario (protegido)
+app.get('/api/locations/:userId', auth.verifyToken, async (req, res) => {
   try {
     const { userId } = req.params;
+    
+    // Solo permitir ver ubicaciones propias o si es admin
+    if (req.user.role !== 'admin' && req.user.deviceId !== userId && req.user.id !== userId) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'No tienes permisos para ver estas ubicaciones.' 
+      });
+    }
 
     if (mongoose.connection.readyState !== 1) {
       return res.json([]);
@@ -167,8 +418,10 @@ app.get('/api/locations/:userId', async (req, res) => {
   }
 });
 
-// Obtener TODOS los usuarios (PARA ADMIN)
-app.get('/api/admin/users', async (req, res) => {
+// ==================== RUTAS DE ADMINISTRACIÓN (PROTEGIDAS) ====================
+
+// Obtener TODOS los usuarios (solo admin)
+app.get('/api/admin/users', auth.verifyToken, auth.isAdmin, async (req, res) => {
   try {
     if (mongoose.connection.readyState !== 1) {
       return res.json([]);
@@ -209,24 +462,27 @@ app.get('/api/admin/users', async (req, res) => {
 
   } catch (error) {
     console.error('Error obteniendo usuarios admin:', error);
-    res.json([]);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error obteniendo usuarios',
+      error: error.message 
+    });
   }
 });
 
-
-// Obtener historial completo de un usuario (PARA ADMIN)
-app.get('/api/admin/user/:userId', async (req, res) => {
+// Obtener historial completo de un usuario (solo admin)
+app.get('/api/admin/user/:userId', auth.verifyToken, auth.isAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
-    const limit = parseInt(req.query.limit) || 500; // 🆕 Aumentar límite por defecto
+    const limit = parseInt(req.query.limit) || 500;
 
     if (mongoose.connection.readyState !== 1) {
       return res.json([]);
     }
 
-    // 🆕 ORDENAR POR TIMESTAMP ASCENDENTE para la línea temporal correcta
+    // ORDENAR POR TIMESTAMP ASCENDENTE para la línea temporal correcta
     const locations = await Location.find({ userId })
-      .sort({ timestamp: 1 }) // 🆕 Cambiar a 1 para orden ascendente
+      .sort({ timestamp: 1 }) // Ascendente para ruta correcta
       .limit(limit);
 
     console.log(`📊 Enviando ${locations.length} ubicaciones para usuario: ${userId}`);
@@ -234,29 +490,11 @@ app.get('/api/admin/user/:userId', async (req, res) => {
 
   } catch (error) {
     console.error('Error obteniendo historial de usuario:', error);
-    res.status(500).json({ error: 'Error interno del servidor' });
-  }
-});
-// Obtener historial completo de un usuario (PARA ADMIN)
-app.get('/api/admin/user/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const limit = parseInt(req.query.limit) || 100;
-
-    if (mongoose.connection.readyState !== 1) {
-      return res.json([]);
-    }
-
-    const locations = await Location.find({ userId })
-      .sort({ timestamp: -1 })
-      .limit(limit);
-
-    console.log(`📊 Enviando ${locations.length} ubicaciones para usuario: ${userId}`);
-    res.json(locations);
-
-  } catch (error) {
-    console.error('Error obteniendo historial de usuario:', error);
-    res.json([]);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error interno del servidor',
+      error: error.message 
+    });
   }
 });
 
@@ -281,7 +519,7 @@ io.on('connection', (socket) => {
     });
   });
 
-  // CORRECCIÓN: Cambiar el nombre del evento para que coincida con el frontend
+  // Enviar ubicación por WebSocket
   socket.on("send-location", (loc) => {
     if (!loc || !loc.userId) return;
 
@@ -336,6 +574,28 @@ io.on('connection', (socket) => {
   });
 });
 
+// ==================== MANEJO DE ERRORES GLOBAL ====================
+
+// Manejo de rutas no encontradas
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'Ruta no encontrada',
+    path: req.path,
+    method: req.method
+  });
+});
+
+// Manejo de errores global
+app.use((err, req, res, next) => {
+  console.error('❌ Error global:', err.stack);
+  res.status(500).json({
+    success: false,
+    message: 'Error interno del servidor',
+    error: process.env.NODE_ENV === 'development' ? err.message : undefined
+  });
+});
+
 // ==================== INICIAR SERVIDOR ====================
 
 const PORT = process.env.PORT || 3000;
@@ -347,5 +607,14 @@ server.listen(PORT, () => {
   console.log(`📍 Servidor: http://localhost:${PORT}`);
   console.log(`🌍 CORS: Habilitado para todos los orígenes`);
   console.log(`🗄️  Base de datos: MongoDB Atlas`);
+  console.log(`🔐 Autenticación: JWT habilitado`);
   console.log('='.repeat(50));
+});
+
+// Manejo de cierre limpio
+process.on('SIGINT', async () => {
+  console.log('\n🔻 Cerrando servidor...');
+  await mongoose.connection.close();
+  console.log('✅ MongoDB desconectado');
+  process.exit(0);
 });
