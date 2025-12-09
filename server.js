@@ -4,6 +4,10 @@ const socketIo = require('socket.io');
 const mongoose = require('mongoose');
 require('dotenv').config();
 
+// Importar modelos
+const User = require('./models/User');
+const Location = require('./models/Location');
+
 const app = express();
 const server = http.createServer(app);
 
@@ -116,7 +120,7 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model('User', userSchema);
 
-// ==================== RUTAS DE LA API ====================
+// ==================== RUTAS PÚBLICAS ====================
 
 // Ruta de prueba
 app.get('/', (req, res) => {
@@ -142,7 +146,8 @@ app.get('/api/cors-test', (req, res) => {
   res.json({
     message: '✅ CORS funcionando correctamente',
     timestamp: new Date().toISOString(),
-    origin: req.headers.origin || 'No origin header'
+    origin: req.headers.origin || 'No origin header',
+    headers: req.headers
   });
 });
 
@@ -383,16 +388,207 @@ app.get('/api/users/:username', async (req, res) => {
 
 // ==================== RUTAS DE UBICACIÓN ====================
 
-// Guardar ubicación
-app.post('/api/location', async (req, res) => {
+// ==================== RUTAS DE AUTENTICACIÓN ====================
+
+// Registrar nuevo usuario
+app.post('/api/auth/register', async (req, res) => {
   try {
-    const { userId, latitude, longitude, accuracy } = req.body;
+    const { email, password, username, fullName, phone, vehicle } = req.body;
+
+    // Validaciones
+    if (!email || !password || !username) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Email, contraseña y nombre de usuario son requeridos.' 
+      });
+    }
+
+    // Verificar si el usuario ya existe
+    const existingUser = await User.findOne({ 
+      $or: [{ email }, { username }] 
+    });
+
+    if (existingUser) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'El email o nombre de usuario ya están registrados.' 
+      });
+    }
+
+    // Crear usuario
+    const user = new User({
+      email: email.toLowerCase(),
+      password,
+      username,
+      role: 'user', // Por defecto es usuario normal
+      profile: {
+        fullName: fullName || '',
+        phone: phone || '',
+        vehicle: vehicle || '',
+        avatarColor: `#${Math.floor(Math.random()*16777215).toString(16)}`
+      },
+      deviceId: `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    });
+
+    await user.save();
+
+    // Generar token JWT
+    const token = jwt.sign(
+      { 
+        id: user._id, 
+        email: user.email, 
+        username: user.username, 
+        role: user.role,
+        deviceId: user.deviceId 
+      },
+      process.env.JWT_SECRET || 'your-secret-key',
+      { expiresIn: '7d' }
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Usuario registrado exitosamente.',
+      user: {
+        id: user._id,
+        email: user.email,
+        username: user.username,
+        role: user.role,
+        deviceId: user.deviceId,
+        profile: user.profile
+      },
+      token
+    });
+
+  } catch (error) {
+    console.error('Error en registro:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error en el servidor.', 
+      error: error.message 
+    });
+  }
+});
+
+// Login de usuario - CORREGIDO
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // Validaciones
+    if (!email || !password) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Email y contraseña son requeridos.' 
+      });
+    }
+
+    // Buscar usuario
+    const user = await User.findOne({ email: email.toLowerCase() });
+    
+    if (!user) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Credenciales inválidas.' 
+      });
+    }
+
+    // Verificar contraseña
+    const isMatch = await user.comparePassword(password);
+    
+    if (!isMatch) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Credenciales inválidas.' 
+      });
+    }
+
+    // Actualizar último login SIN trigger del middleware
+    user.lastLogin = new Date();
+    
+    // Guardar sin validar para evitar problemas con el middleware de password
+    await user.save({ validateBeforeSave: false });
+
+    // Generar token JWT
+    const token = jwt.sign(
+      { 
+        id: user._id, 
+        email: user.email, 
+        username: user.username, 
+        role: user.role,
+        deviceId: user.deviceId 
+      },
+      process.env.JWT_SECRET || 'your-secret-key',
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      success: true,
+      message: 'Login exitoso.',
+      user: {
+        id: user._id,
+        email: user.email,
+        username: user.username,
+        role: user.role,
+        deviceId: user.deviceId,
+        profile: user.profile,
+        lastLogin: user.lastLogin
+      },
+      token
+    });
+
+  } catch (error) {
+    console.error('Error en login:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error en el servidor.', 
+      error: error.message 
+    });
+  }
+});
+
+// Obtener perfil del usuario actual (protegido)
+app.get('/api/auth/profile', auth.verifyToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('-password');
+    
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Usuario no encontrado.' 
+      });
+    }
+
+    res.json({
+      success: true,
+      user
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo perfil:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error en el servidor.' 
+    });
+  }
+});
+
+// ==================== RUTAS DE UBICACIONES ====================
+
+// Guardar ubicación (protegida)
+app.post('/api/location', auth.verifyToken, async (req, res) => {
+  try {
+    // Usar el userId del usuario autenticado
+    const userId = req.user.deviceId || req.user.id;
+    const { latitude, longitude, accuracy } = req.body;
 
     console.log('📍 Recibiendo ubicación para guardar:', { userId, latitude, longitude });
 
     // Validaciones básicas
-    if (!userId || latitude === undefined || longitude === undefined) {
-      return res.status(400).json({ error: 'Datos incompletos' });
+    if (latitude === undefined || longitude === undefined) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Datos incompletos' 
+      });
     }
 
     let location;
@@ -415,7 +611,7 @@ app.post('/api/location', async (req, res) => {
       userId,
       latitude,
       longitude,
-      accuracy,
+      accuracy: accuracy || 0,
       timestamp: location?.timestamp || new Date()
     });
 
@@ -423,7 +619,7 @@ app.post('/api/location', async (req, res) => {
       userId,
       latitude,
       longitude,
-      accuracy,
+      accuracy: accuracy || 0,
       timestamp: location?.timestamp || new Date(),
       type: 'user_update'
     });
@@ -437,16 +633,25 @@ app.post('/api/location', async (req, res) => {
   } catch (error) {
     console.error('❌ Error procesando ubicación:', error);
     res.status(500).json({
+      success: false,
       error: 'Error interno del servidor',
       details: error.message
     });
   }
 });
 
-// Obtener ubicaciones de un usuario
-app.get('/api/locations/:userId', async (req, res) => {
+// Obtener ubicaciones de un usuario (protegido)
+app.get('/api/locations/:userId', auth.verifyToken, async (req, res) => {
   try {
     const { userId } = req.params;
+    
+    // Solo permitir ver ubicaciones propias o si es admin
+    if (req.user.role !== 'admin' && req.user.deviceId !== userId && req.user.id !== userId) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'No tienes permisos para ver estas ubicaciones.' 
+      });
+    }
 
     if (mongoose.connection.readyState !== 1) {
       return res.json([]);
@@ -467,8 +672,10 @@ app.get('/api/locations/:userId', async (req, res) => {
 
 // ==================== RUTAS DE ADMINISTRACIÓN ====================
 
-// Obtener TODOS los usuarios (PARA ADMIN)
-app.get('/api/admin/users', async (req, res) => {
+// ==================== RUTAS DE ADMINISTRACIÓN (PROTEGIDAS) ====================
+
+// Obtener TODOS los usuarios (solo admin)
+app.get('/api/admin/users', auth.verifyToken, auth.isAdmin, async (req, res) => {
   try {
     if (mongoose.connection.readyState !== 1) {
       return res.json([]);
@@ -509,12 +716,16 @@ app.get('/api/admin/users', async (req, res) => {
 
   } catch (error) {
     console.error('Error obteniendo usuarios admin:', error);
-    res.json([]);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error obteniendo usuarios',
+      error: error.message 
+    });
   }
 });
 
-// Obtener historial completo de un usuario (PARA ADMIN)
-app.get('/api/admin/user/:userId', async (req, res) => {
+// Obtener historial completo de un usuario (solo admin)
+app.get('/api/admin/user/:userId', auth.verifyToken, auth.isAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
     const limit = parseInt(req.query.limit) || 500;
@@ -524,8 +735,9 @@ app.get('/api/admin/user/:userId', async (req, res) => {
     }
 
     // ORDENAR POR TIMESTAMP ASCENDENTE para la línea temporal correcta
+    // ORDENAR POR TIMESTAMP ASCENDENTE para la línea temporal correcta
     const locations = await Location.find({ userId })
-      .sort({ timestamp: 1 })
+      .sort({ timestamp: 1 }) // 🆕 Cambiar a 1 para orden ascendente
       .limit(limit);
 
     console.log(`📊 Enviando ${locations.length} ubicaciones para usuario: ${userId}`);
